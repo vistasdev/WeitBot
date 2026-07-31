@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 CS 1.6 Server uchun FULL Telegram Bot
-Versiya: 3.2 - Conflict xatosi tuzatilgan
+Versiya: 3.3 - a2s tuzatilgan
 """
 
 import json
@@ -18,6 +18,7 @@ from typing import List
 from dataclasses import dataclass, asdict, field
 
 import a2s
+from a2s import a2s_info, a2s_players
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.constants import ChatType, ParseMode
 from telegram.ext import (
@@ -210,15 +211,16 @@ def mention(user) -> str:
     return f'<a href="tg://user?id={user.id}">{name}</a>'
 
 def get_server_info():
-    """Server ma'lumotlarini olish"""
+    """Server ma'lumotlarini olish - TO'G'RI a2s bilan"""
     address = (config.SERVER_IP, config.SERVER_PORT)
     try:
+        # To'g'ri usul - a2s.info va a2s.players
         info = a2s.info(address, timeout=3.0)
         players = []
         try:
             players = a2s.players(address, timeout=3.0)
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Players olishda xato: {e}")
         return info, players
     except Exception as e:
         logger.error(f"Server info olishda xato: {e}")
@@ -353,7 +355,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
 
 # ---------------------------------------------------------------------------
-# Settings callback handler
+# Settings callback handler - QISQARTIRILGAN
 # ---------------------------------------------------------------------------
 
 async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -578,7 +580,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await settings_callback(update, context)
 
 # ---------------------------------------------------------------------------
-# /info
+# /info - TUZATILGAN
 # ---------------------------------------------------------------------------
 
 async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -634,7 +636,7 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(text, parse_mode=ParseMode.HTML)
 
 # ---------------------------------------------------------------------------
-# /ping
+# /ping - TUZATILGAN
 # ---------------------------------------------------------------------------
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -755,9 +757,7 @@ async def resolve_target(update: Update, context: ContextTypes.DEFAULT_TYPE, arg
             d.first_name = first
             d.username = None
             return d, rest
-    return None, None
-
-def only_group(func):
+    return None, Nonedef only_group(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
             await update.message.reply_text("❌ Bu buyruq faqat guruhlarda ishlaydi.")
@@ -1414,7 +1414,7 @@ async def dot_command_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await DOT_COMMANDS[cmd](update, context)
 
 # ---------------------------------------------------------------------------
-# Botni ishga tushirish - CONFLICT XATOSI TUZATILDI
+# Botni ishga tushirish
 # ---------------------------------------------------------------------------
 
 async def run_bot_async():
@@ -1441,13 +1441,11 @@ async def run_bot_async():
 
     logger.info("Bot ishga tushdi...")
     
-    # Webhook ni o'chirish - CONFLICT xatosini oldini olish uchun
+    # Webhook ni o'chirish
     await application.bot.delete_webhook(drop_pending_updates=True)
     
     await application.initialize()
     await application.start()
-    
-    # Polling ni ishga tushirish
     await application.updater.start_polling(drop_pending_updates=True)
     
     try:
