@@ -25,6 +25,7 @@ from datetime import timedelta, datetime, timezone
 from fastapi import FastAPI
 import uvicorn
 import threading
+import asyncio
 
 import a2s
 from telegram import Update, Chat
@@ -38,6 +39,10 @@ app = FastAPI()
 
 @app.get("/")
 async def root():
+    return {"status": "Bot is running"}
+
+@app.head("/")
+async def root_head():
     return {"status": "Bot is running"}
 
 logging.basicConfig(
@@ -512,8 +517,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def run_bot():
-    """Telegram botni ishga tushiradi"""
+async def run_bot_async():
+    """Telegram botni asinxron ishga tushiradi"""
     if config.BOT_TOKEN == "BOT_TOKEN_BU_YERGA":
         print("❌ config.py faylida BOT_TOKEN ni to'g'ri kiritmagansiz!")
         return
@@ -533,7 +538,30 @@ def run_bot():
     logger.info("Bot ishga tushdi...")
     
     # Polling orqali ishga tushiramiz
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    
+    # Botni ishlab turishi uchun
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
+
+
+def run_bot():
+    """Telegram botni threadda ishga tushirish"""
+    # Yangi event loop yaratamiz
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        loop.run_until_complete(run_bot_async())
+    finally:
+        loop.close()
 
 
 if __name__ == "__main__":
@@ -543,5 +571,5 @@ if __name__ == "__main__":
     print("Telegram bot Long Polling rejimida ishga tushdi...")
     
     # 2. Render portni tinglashi uchun FastAPI veb-serverini yurgizamiz
-    port = int(os.getenv("PORT", 3000))
+    port = int(os.getenv("PORT", 10000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
