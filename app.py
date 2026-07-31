@@ -525,5 +525,18 @@ def main():
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
+# Esli "if __name__ == '__main__':" qismini quyidagicha o'zgartiring:
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    import os
+    import threading
+    
+    # 1. Telegram botni alohida fonda (thread) ishga tushiramiz
+    # Eslatma: 'bot' o'rniga o'zingizning telebot ob'ektingiz nomini yozing
+    threading.Thread(target=bot.infinity_polling, daemon=True).start()
+    print("Telegram bot Long Polling rejimida ishga tushdi...")
+    
+    # 2. Render portni tinglashi uchun FastAPI veb-serverini yurgizamiz
+    port = int(os.getenv("PORT", 3000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
+
