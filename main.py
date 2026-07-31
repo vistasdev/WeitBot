@@ -22,6 +22,9 @@ import logging
 import re
 import os
 from datetime import timedelta, datetime, timezone
+from fastapi import FastAPI
+import uvicorn
+import threading
 
 import a2s
 from telegram import Update, Chat
@@ -29,6 +32,13 @@ from telegram.constants import ChatType, ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 import config
+
+# FastAPI app for Render
+app = FastAPI()
+
+@app.get("/")
+async def root():
+    return {"status": "Bot is running"}
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -460,8 +470,6 @@ async def del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------------------------------------------------------------------
 # '.' bilan boshlanadigan buyruqlarni yo'naltirish
-# (Telegram bot API faqat '/' buyruqlarini avtomatik tanadi, shu uchun
-#  '.' bilan boshlanuvchi xabarlarni qo'lda ushlab, kerakli funksiyaga uzatamiz)
 # ---------------------------------------------------------------------------
 
 DOT_COMMANDS = {
@@ -482,7 +490,6 @@ async def dot_command_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     cmd = parts[0].lower()
     if cmd in DOT_COMMANDS:
-        # context.args ni qo'lda to'ldiramiz, chunki bu standart CommandHandler emas
         context.args = parts[1:]
         await DOT_COMMANDS[cmd](update, context)
 
@@ -505,7 +512,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def main():
+def run_bot():
+    """Telegram botni ishga tushiradi"""
     if config.BOT_TOKEN == "BOT_TOKEN_BU_YERGA":
         print("❌ config.py faylida BOT_TOKEN ni to'g'ri kiritmagansiz!")
         return
@@ -513,30 +521,27 @@ def main():
         print("❌ config.py faylida OWNER_ID ni to'g'ri kiritmagansiz!")
         return
 
-    app = Application.builder().token(config.BOT_TOKEN).build()
+    # Application obyektini yaratamiz
+    application = Application.builder().token(config.BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("info", info_cmd))
+    application.add_handler(CommandHandler("start", start_cmd))
+    application.add_handler(CommandHandler("info", info_cmd))
 
     # '.' bilan boshlanuvchi buyruqlar uchun umumiy router
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, dot_command_router))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, dot_command_router))
 
     logger.info("Bot ishga tushdi...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
-# Esli "if __name__ == '__main__':" qismini quyidagicha o'zgartiring:
-if __name__ == "__main__":
-    import uvicorn
-    import os
-    import threading
     
-    # 1. Telegram botni alohida fonda (thread) ishga tushiramiz
-    # Eslatma: 'bot' o'rniga o'zingizning telebot ob'ektingiz nomini yozing
-    threading.Thread(target=bot.infinity_polling, daemon=True).start()
+    # Polling orqali ishga tushiramiz
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    # 1. Telegram botni alohida threadda ishga tushiramiz
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
     print("Telegram bot Long Polling rejimida ishga tushdi...")
     
     # 2. Render portni tinglashi uchun FastAPI veb-serverini yurgizamiz
     port = int(os.getenv("PORT", 3000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
-
