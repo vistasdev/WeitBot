@@ -1,4 +1,4 @@
 python-telegram-bot==21.10
 fastapi
 uvicorn
-a2s
+python-a2s
