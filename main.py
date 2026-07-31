@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 CS 1.6 Server uchun FULL Telegram Bot
-Versiya: 3.5 - Barcha buyruqlar . (nuqta) orqali + .rules qo'shildi
+Versiya: 4.0 - Rolega qarab menyu (user/admin/owner), xavfsizlik yaxshilandi,
+                UI/UX chiroyli qilindi.
 """
 
 import json
@@ -15,7 +16,7 @@ import threading
 import asyncio
 import time
 import socket
-from typing import List
+from typing import List, Optional
 from dataclasses import dataclass, asdict, field
 
 import a2s
@@ -140,7 +141,7 @@ def load_json(filename: str, default: dict = None) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except Exception:
         return default or {}
 
 def save_json(filename: str, data: dict) -> None:
@@ -163,7 +164,10 @@ def load_settings(chat_id: int) -> GroupSettings:
     chat_id_str = str(chat_id)
     if chat_id_str not in data:
         return GroupSettings()
-    return GroupSettings(**data[chat_id_str])
+    # Eski saqlangan sozlamalarda yangi maydon bo'lmasa ham xato bermasin
+    known_fields = {f.name for f in GroupSettings.__dataclass_fields__.values()}
+    clean = {k: v for k, v in data[chat_id_str].items() if k in known_fields}
+    return GroupSettings(**clean)
 
 def save_settings(chat_id: int, settings: GroupSettings) -> None:
     data = load_json("settings.json", {})
@@ -182,17 +186,36 @@ def load_stats() -> dict:
 def save_stats(data: dict) -> None:
     save_json("stats.json", data)
 
+# ---------------------------------------------------------------------------
+# Rol / darajalarni aniqlash (xavfsizlikning yuragi shu yerda)
+# ---------------------------------------------------------------------------
+
 def get_level(user_id: int) -> int:
     if user_id == config.OWNER_ID:
         return OWNER_LEVEL
     data = load_admins()
-    return int(data.get("admins", {}).get(str(user_id), 0))
+    try:
+        return int(data.get("admins", {}).get(str(user_id), 0))
+    except (TypeError, ValueError):
+        return 0
 
 def is_owner(user_id: int) -> bool:
     return user_id == config.OWNER_ID
 
 def is_admin(user_id: int) -> bool:
     return get_level(user_id) > 0 or is_owner(user_id)
+
+def rank_name(level: int) -> str:
+    """Darajaga qarab chiroyli unvon"""
+    if level >= OWNER_LEVEL:
+        return "👑 Bot egasi"
+    if level >= 10:
+        return "🛡 Bosh admin"
+    if level >= 5:
+        return "⭐️ Katta admin"
+    if level >= 1:
+        return "👮 Admin"
+    return "👤 Foydalanuvchi"
 
 def can_moderate(actor_id: int, target_id: int) -> tuple[bool, str]:
     if target_id == config.OWNER_ID:
@@ -212,6 +235,37 @@ def can_moderate(actor_id: int, target_id: int) -> tuple[bool, str]:
 
     return False, "❌ Bu foydalanuvchi sizdan yuqori yoki teng darajali admin."
 
+def require_admin(func):
+    """Faqat adminlar (yoki owner) ishlata oladigan buyruqlar uchun dekorator.
+    Oddiy foydalanuvchiga hech qanday admin buyrug'i haqida ma'lumot bermaydi -
+    faqat qisqa rad javobi qaytaradi."""
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if not user or not is_admin(user.id):
+            await update.effective_message.reply_text("❌ Bu buyruq faqat adminlar uchun.")
+            return
+        return await func(update, context)
+    return wrapper
+
+def require_owner(func):
+    """Faqat bot egasi ishlata oladigan buyruqlar uchun dekorator."""
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if not user or not is_owner(user.id):
+            await update.effective_message.reply_text("❌ Bu buyruq faqat bot egasi uchun.")
+            return
+        return await func(update, context)
+    return wrapper
+
+def only_group(func):
+    """Faqat guruhlarda ishlaydigan buyruqlar uchun dekorator"""
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.effective_chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+            await update.message.reply_text("❌ Bu buyruq faqat guruhlarda ishlaydi.")
+            return
+        return await func(update, context)
+    return wrapper
+
 # ---------------------------------------------------------------------------
 # Yordamchi funksiyalar
 # ---------------------------------------------------------------------------
@@ -229,7 +283,7 @@ def parse_duration(text: str):
     num, unit = m.groups()
     return timedelta(seconds=int(num) * UNIT_SECONDS[unit])
 
-def fmt_duration(td: timedelta | None) -> str:
+def fmt_duration(td: Optional[timedelta]) -> str:
     if td is None:
         return "doimiy"
     total = int(td.total_seconds())
@@ -278,8 +332,8 @@ def has_links(text: str) -> bool:
     return bool(url_pattern.search(text))
 
 # ---------------------------------------------------------------------------
-# /start (Telegram talabiga ko'ra shu buyruq har doim slash bilan keladi,
-# chunki "Start" tugmasini bosganda Telegram avtomatik /start yuboradi)
+# /start - rolega qarab tugmalar (admin bo'lmasa, admin tugmalari umuman
+# ko'rinmaydi)
 # ---------------------------------------------------------------------------
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -288,6 +342,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = update.effective_user
     first_name = user.first_name or "Foydalanuvchi"
+    level = get_level(user.id)
 
     keyboard = [
         [
@@ -295,18 +350,29 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🏓 Ping", callback_data="ping")
         ],
         [
-            InlineKeyboardButton("⚙️ Sozlamalar", callback_data="settings"),
-            InlineKeyboardButton("👥 Adminlar", callback_data="admins")
-        ],
-        [
-            InlineKeyboardButton("➕ Guruhga qo'shish", url=f"https://t.me/{context.bot.username}?startgroup=true"),
+            InlineKeyboardButton("📜 Qoidalar", callback_data="rules"),
             InlineKeyboardButton("💬 Yordam", callback_data="help")
-        ]
+        ],
     ]
+
+    # Faqat adminlarga ko'rinadigan tugmalar
+    if is_admin(user.id):
+        keyboard.append([
+            InlineKeyboardButton("⚙️ Sozlamalar", callback_data="settings"),
+            InlineKeyboardButton("👥 Adminlar", callback_data="admins"),
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton("➕ Guruhga qo'shish", url=f"https://t.me/{context.bot.username}?startgroup=true"),
+    ])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
+
+    role_line = f"🎖 Sizning darajangiz: <b>{rank_name(level)}</b>\n\n" if is_admin(user.id) else ""
 
     text = (
         f"🎯 <b>Assalomu alaykum, {first_name}!</b>\n\n"
+        f"{role_line}"
         "Men <b>CS 1.6</b> serveringiz uchun <b>FULL</b> yordamchi botman.\n\n"
         "🛡 <b>Mening imkoniyatlarim:</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -317,50 +383,61 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ Spam himoyasi\n"
         "✅ Ogohlantirish tizimi\n"
         "✅ CS 1.6 server ma'lumotlari\n\n"
-        "📋 <b>Buyruqlar (nuqta bilan yoziladi):</b>\n"
-        "• <code>.help</code> - Yordam\n"
-        "• <code>.info</code> - Server holati\n"
-        "• <code>.ping</code> - Server ping\n"
-        "• <code>.settings</code> - Guruh sozlamalari\n"
-        "• <code>.admins</code> - Adminlar\n"
-        "• <code>.rules</code> - Server qoidalari\n\n"
-        "💡 Guruhga qo'shib, meni <b>ADMIN</b> qiling!"
+        "💡 Guruhga qo'shib, meni <b>ADMIN</b> qiling!\n"
+        "📋 Barcha buyruqlar uchun: <code>.help</code>"
     )
 
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
 
 # ---------------------------------------------------------------------------
-# .help
+# .help — rolega qarab: oddiy user admin buyruqlarini UMUMAN ko'rmaydi
 # ---------------------------------------------------------------------------
 
+USER_HELP_TEXT = (
+    "📚 <b>Yordam menyusi</b>\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "🎮 <b>Buyruqlar:</b>\n"
+    "• <code>/start</code> - Botni ishga tushirish (shaxsiy chatda)\n"
+    "• <code>.help</code> - Yordam\n"
+    "• <code>.info</code> - Server holati\n"
+    "• <code>.ping</code> - Server ping\n"
+    "• <code>.rules</code> - Server qoidalari\n"
+    "• <code>.warns</code> - O'zingizning ogohlantirishlaringiz\n"
+)
+
+ADMIN_HELP_EXTRA = (
+    "\n👮 <b>Admin buyruqlari:</b>\n"
+    "• <code>.ban @user 1d sabab</code> - Ban\n"
+    "• <code>.kick @user sabab</code> - Kick\n"
+    "• <code>.mute @user 1h sabab</code> - Mute\n"
+    "• <code>.unmute @user</code> - Unmute\n"
+    "• <code>.warn @user sabab</code> - Ogohlantirish\n"
+    "• <code>.warns @user</code> - Kimningdir ogohlantirishlari\n"
+    "• <code>.clearwarns @user</code> - Tozalash\n"
+    "• <code>.pin</code> (reply) - Pin qilish\n"
+    "• <code>.del</code> (reply) - O'chirish\n"
+    "• <code>.addword so'z</code> - Taqiqlangan so'z qo'shish\n"
+    "• <code>.delword so'z</code> - Taqiqlangan so'z o'chirish\n"
+    "• <code>.settings</code> - Guruh sozlamalari\n"
+    "• <code>.admins</code> - Adminlar ro'yxati\n"
+)
+
+OWNER_HELP_EXTRA = (
+    "\n👑 <b>Bot egasi buyruqlari:</b>\n"
+    "• <code>.addadmin @user level</code> - Admin qo'shish\n"
+    "• <code>.removeadmin @user</code> - Admin o'chirish\n"
+)
+
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "📚 <b>Yordam menyusi</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "🎮 <b>Asosiy buyruqlar:</b>\n"
-        "• <code>/start</code> - Botni ishga tushirish (shaxsiy chatda)\n"
-        "• <code>.help</code> - Yordam\n"
-        "• <code>.info</code> - Server holati\n"
-        "• <code>.ping</code> - Server ping\n"
-        "• <code>.settings</code> - Guruh sozlamalari\n"
-        "• <code>.admins</code> - Adminlar\n"
-        "• <code>.rules</code> - Server qoidalari\n\n"
-        "👮 <b>Admin buyruqlari:</b>\n"
-        "• <code>.ban @user 1d sabab</code> - Ban\n"
-        "• <code>.kick @user sabab</code> - Kick\n"
-        "• <code>.mute @user 1h sabab</code> - Mute\n"
-        "• <code>.unmute @user</code> - Unmute\n"
-        "• <code>.warn @user sabab</code> - Ogohlantirish\n"
-        "• <code>.warns @user</code> - Ogohlantirishlar\n"
-        "• <code>.clearwarns @user</code> - Tozalash\n"
-        "• <code>.pin</code> (reply) - Pin qilish\n"
-        "• <code>.del</code> (reply) - O'chirish\n"
-        "• <code>.addword so'z</code> - Taqiqlangan so'z qo'shish\n"
-        "• <code>.delword so'z</code> - Taqiqlangan so'z o'chirish\n\n"
-        "👑 <b>Bot egasi buyruqlari:</b>\n"
-        "• <code>.addadmin @user level</code> - Admin qo'shish\n"
-        "• <code>.removeadmin @user</code> - Admin o'chirish"
-    )
+    user = update.effective_user
+    text = USER_HELP_TEXT
+    if is_admin(user.id):
+        text += ADMIN_HELP_EXTRA
+    if is_owner(user.id):
+        text += OWNER_HELP_EXTRA
+
+    text += f"\n🎖 Sizning darajangiz: <b>{rank_name(get_level(user.id))}</b>"
+
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # ---------------------------------------------------------------------------
@@ -410,24 +487,27 @@ async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📢 Asosiy kanal", url="https://t.me/weit_cs")]
     ]
-    await update.effective_message.reply_text(
-        RULES_TEXT,
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        disable_web_page_preview=True,
-    )
+    if update.callback_query:
+        await update.callback_query.message.edit_text(
+            RULES_TEXT,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True,
+        )
+    else:
+        await update.effective_message.reply_text(
+            RULES_TEXT,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True,
+        )
 
 # ---------------------------------------------------------------------------
-# .settings
+# .settings - faqat adminlar
 # ---------------------------------------------------------------------------
 
+@require_admin
 async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-
-    if not is_admin(update.effective_user.id):
-        await update.effective_message.reply_text("❌ Bu buyruq faqat adminlar uchun!")
-        return
-
     keyboard = [
         [InlineKeyboardButton("👋 Salomlashish", callback_data="settings_welcome")],
         [InlineKeyboardButton("🚫 Taqiqlangan so'zlar", callback_data="settings_banned_words")],
@@ -446,14 +526,24 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Kerakli bo'limni tanlang:"
     )
 
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    if update.callback_query:
+        await update.callback_query.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    else:
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
 
 # ---------------------------------------------------------------------------
-# Settings callback handler
+# Settings callback handler - har bosishda admin ekanligi qayta tekshiriladi
+# (aks holda link orqali kirib qolgan oddiy user tugmalarni bosib sozlamani
+# o'zgartirib qo'yishi mumkin edi)
 # ---------------------------------------------------------------------------
 
 async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+
+    if not is_admin(update.effective_user.id):
+        await query.answer("❌ Bu tugma faqat adminlar uchun.", show_alert=True)
+        return
+
     await query.answer()
 
     chat_id = update.effective_chat.id
@@ -577,7 +667,6 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Ban qilish: {'✅ Ha' if settings.ban_on_warn else '❌ Yo\'q'}"
         )
         keyboard = [
-            [InlineKeyboardButton("📊 Limitni o'zgartirish", callback_data="settings_warn_limit")],
             [InlineKeyboardButton("🔇 Mute qilish", callback_data="settings_warn_mute")],
             [InlineKeyboardButton("🔨 Ban qilish", callback_data="settings_warn_ban")],
             [InlineKeyboardButton("🔙 Orqaga", callback_data="settings")]
@@ -651,27 +740,33 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_cmd(update, context)
 
 # ---------------------------------------------------------------------------
-# Inline button handler
+# Inline button handler (umumiy tugmalar - hammaga ochiq bo'lgan)
 # ---------------------------------------------------------------------------
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-
     data = query.data
+
+    if data.startswith("settings"):
+        # settings_callback o'zi admin tekshiruvini va query.answer()ni qiladi
+        await settings_callback(update, context)
+        return
+
+    await query.answer()
 
     if data == "info":
         await info_cmd(update, context)
     elif data == "ping":
         await ping_cmd(update, context)
     elif data == "admins":
+        if not is_admin(update.effective_user.id):
+            await query.answer("❌ Bu bo'lim faqat adminlar uchun.", show_alert=True)
+            return
         await admins_cmd(update, context)
-    elif data == "settings":
-        await settings_cmd(update, context)
+    elif data == "rules":
+        await rules_cmd(update, context)
     elif data == "help":
         await help_cmd(update, context)
-    elif data.startswith("settings_"):
-        await settings_callback(update, context)
 
 # ---------------------------------------------------------------------------
 # .info
@@ -727,7 +822,8 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text += "\n👤 Hozircha serverda o'yinchi yo'q."
 
-    await msg.edit_text(text, parse_mode=ParseMode.HTML)
+    keyboard = [[InlineKeyboardButton("🔄 Yangilash", callback_data="info")]]
+    await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # ---------------------------------------------------------------------------
 # .ping
@@ -770,7 +866,8 @@ async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text += f"\n📊 Holat: {status}"
 
-        await msg.edit_text(text, parse_mode=ParseMode.HTML)
+        keyboard = [[InlineKeyboardButton("🔄 Yangilash", callback_data="ping")]]
+        await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         await msg.edit_text(
             f"❌ Serverga ping yuborib bo'lmadi!\n"
@@ -780,9 +877,10 @@ async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ---------------------------------------------------------------------------
-# .admins
+# .admins - faqat adminlar
 # ---------------------------------------------------------------------------
 
+@require_admin
 async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_admins()
     admins = data.get("admins", {})
@@ -800,7 +898,7 @@ async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"👑 <b>Bot egasi</b>\n"
         text += f"   {mention(owner)}\n"
         text += f"   Daraja: <b>MAX</b>\n\n"
-    except:
+    except Exception:
         text += f"👑 <b>Bot egasi</b>\n"
         text += f"   ID: <code>{config.OWNER_ID}</code>\n"
         text += f"   Daraja: <b>MAX</b>\n\n"
@@ -810,11 +908,11 @@ async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for user_id, level in sorted(admins.items(), key=lambda x: x[1], reverse=True):
             try:
                 user = await context.bot.get_chat(int(user_id))
-                text += f"   {mention(user)}\n"
-                text += f"   Daraja: <b>{level}</b>\n\n"
-            except:
-                text += f"   ID: <code>{user_id}</code>\n"
-                text += f"   Daraja: <b>{level}</b>\n\n"
+                text += f"   {mention(user)} — {rank_name(level)}\n"
+            except Exception:
+                text += f"   ID: <code>{user_id}</code> — {rank_name(level)}\n"
+    else:
+        text += "👮 Hozircha qo'shimcha adminlar yo'q."
 
     if update.callback_query:
         await message.edit_text(text, parse_mode=ParseMode.HTML)
@@ -822,7 +920,7 @@ async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # ---------------------------------------------------------------------------
-# Admin buyruqlar
+# Admin buyruqlar uchun umumiy yordamchi
 # ---------------------------------------------------------------------------
 
 async def resolve_target(update: Update, context: ContextTypes.DEFAULT_TYPE, args: list[str]):
@@ -854,23 +952,15 @@ async def resolve_target(update: Update, context: ContextTypes.DEFAULT_TYPE, arg
             return d, rest
     return None, None
 
-def only_group(func):
-    """Faqat guruhlarda ishlaydigan buyruqlar uchun dekorator"""
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-            await update.message.reply_text("❌ Bu buyruq faqat guruhlarda ishlaydi.")
-            return
-        return await func(update, context)
-    return wrapper
-
 # ---------------------------------------------------------------------------
 # BAN
 # ---------------------------------------------------------------------------
 
 @only_group
+@require_admin
 async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     actor = update.effective_user
-    args = context.args if context.args else update.message.text.split()[1:]
+    args = context.args or []
 
     target, rest = await resolve_target(update, context, args)
     if target is None:
@@ -921,9 +1011,10 @@ async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 
 @only_group
+@require_admin
 async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     actor = update.effective_user
-    args = context.args if context.args else update.message.text.split()[1:]
+    args = context.args or []
 
     target, rest = await resolve_target(update, context, args)
     if target is None:
@@ -957,9 +1048,10 @@ async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 
 @only_group
+@require_admin
 async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     actor = update.effective_user
-    args = context.args if context.args else update.message.text.split()[1:]
+    args = context.args or []
 
     target, rest = await resolve_target(update, context, args)
     if target is None:
@@ -1011,9 +1103,10 @@ async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 
 @only_group
+@require_admin
 async def unmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     actor = update.effective_user
-    args = context.args if context.args else update.message.text.split()[1:]
+    args = context.args or []
 
     target, rest = await resolve_target(update, context, args)
     if target is None:
@@ -1052,9 +1145,10 @@ async def unmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 
 @only_group
+@require_admin
 async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     actor = update.effective_user
-    args = context.args if context.args else update.message.text.split()[1:]
+    args = context.args or []
 
     target, rest = await resolve_target(update, context, args)
     if target is None:
@@ -1114,7 +1208,7 @@ async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{mention(target)} {settings.warn_limit} ta ogohlantirishdan keyin ban qilindi!",
                     parse_mode=ParseMode.HTML
                 )
-            except:
+            except Exception:
                 pass
         elif settings.mute_on_warn:
             try:
@@ -1130,20 +1224,31 @@ async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{mention(target)} {settings.warn_limit} ta ogohlantirishdan keyin {settings.mute_duration} daqiqaga mute qilindi!",
                     parse_mode=ParseMode.HTML
                 )
-            except:
+            except Exception:
                 pass
 
 # ---------------------------------------------------------------------------
-# WARNS
+# WARNS - oddiy user faqat O'ZINI ko'ra oladi, admin istalganini ko'ra oladi
 # ---------------------------------------------------------------------------
 
 @only_group
 async def warns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args if context.args else update.message.text.split()[1:]
+    actor = update.effective_user
+    args = context.args or []
 
-    target, rest = await resolve_target(update, context, args)
-    if target is None:
-        await update.message.reply_text("⚠️ Foydalanish: <code>.warns @user</code>", parse_mode=ParseMode.HTML)
+    # Argument berilmasa -> so'ragan odamning o'zini tekshiramiz
+    if not args and not update.message.reply_to_message:
+        target = actor
+        rest = []
+    else:
+        target, rest = await resolve_target(update, context, args)
+        if target is None:
+            await update.message.reply_text("⚠️ Foydalanish: <code>.warns</code> yoki <code>.warns @user</code> (faqat admin uchun)", parse_mode=ParseMode.HTML)
+            return
+
+    # Faqat admin boshqa birovning warnini ko'ra oladi
+    if target.id != actor.id and not is_admin(actor.id):
+        await update.message.reply_text("❌ Faqat o'z ogohlantirishlaringizni ko'rishingiz mumkin.")
         return
 
     warns_data = load_warns()
@@ -1171,17 +1276,13 @@ async def warns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 
 @only_group
+@require_admin
 async def clear_warns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    actor = update.effective_user
-    args = context.args if context.args else update.message.text.split()[1:]
+    args = context.args or []
 
     target, rest = await resolve_target(update, context, args)
     if target is None:
         await update.message.reply_text("⚠️ Foydalanish: <code>.clearwarns @user</code>", parse_mode=ParseMode.HTML)
-        return
-
-    if not is_admin(actor.id):
-        await update.message.reply_text("❌ Sizda admin huquqi yo'q.")
         return
 
     warns_data = load_warns()
@@ -1202,12 +1303,8 @@ async def clear_warns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 
 @only_group
+@require_admin
 async def pin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    actor = update.effective_user
-    if not is_admin(actor.id):
-        await update.message.reply_text("❌ Sizda admin huquqi yo'q.")
-        return
-
     if not update.message.reply_to_message:
         await update.message.reply_text("⚠️ Pin qilish uchun xabarga reply qiling: <code>.pin</code>", parse_mode=ParseMode.HTML)
         return
@@ -1226,12 +1323,8 @@ async def pin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 
 @only_group
+@require_admin
 async def del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    actor = update.effective_user
-    if not is_admin(actor.id):
-        await update.message.reply_text("❌ Sizda admin huquqi yo'q.")
-        return
-
     if not update.message.reply_to_message:
         await update.message.reply_text("⚠️ O'chirish uchun xabarga reply qiling: <code>.del</code>", parse_mode=ParseMode.HTML)
         return
@@ -1253,12 +1346,9 @@ async def del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 
 @only_group
+@require_admin
 async def add_word_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Sizda admin huquqi yo'q.")
-        return
-
-    args = context.args if context.args else update.message.text.split()[1:]
+    args = context.args or []
     if not args:
         await update.message.reply_text("⚠️ Foydalanish: <code>.addword so'z</code>", parse_mode=ParseMode.HTML)
         return
@@ -1279,12 +1369,9 @@ async def add_word_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 @only_group
+@require_admin
 async def del_word_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Sizda admin huquqi yo'q.")
-        return
-
-    args = context.args if context.args else update.message.text.split()[1:]
+    args = context.args or []
     if not args:
         await update.message.reply_text("⚠️ Foydalanish: <code>.delword so'z</code>", parse_mode=ParseMode.HTML)
         return
@@ -1308,12 +1395,9 @@ async def del_word_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Bot egasi buyruqlari
 # ---------------------------------------------------------------------------
 
+@require_owner
 async def add_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_user.id):
-        await update.message.reply_text("❌ Bu buyruq faqat bot egasi uchun!")
-        return
-
-    args = context.args if context.args else update.message.text.split()[1:]
+    args = context.args or []
     if len(args) < 2:
         await update.message.reply_text("⚠️ Foydalanish: <code>.addadmin @user level</code>", parse_mode=ParseMode.HTML)
         return
@@ -1324,13 +1408,17 @@ async def add_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         level = int(args[1])
-    except:
+    except ValueError:
         await update.message.reply_text("⚠️ Level son bo'lishi kerak!")
+        return
+
+    if level <= 0:
+        await update.message.reply_text("⚠️ Level musbat son bo'lishi kerak!")
         return
 
     try:
         user = await context.bot.get_chat(f"@{target_username}")
-    except:
+    except Exception:
         await update.message.reply_text(f"❌ {target_username} topilmadi!")
         return
 
@@ -1340,16 +1428,13 @@ async def add_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"✅ {mention(user)} admin qilib tayinlandi!\n"
-        f"📊 Daraja: <b>{level}</b>",
+        f"📊 Daraja: <b>{level}</b> ({rank_name(level)})",
         parse_mode=ParseMode.HTML
     )
 
+@require_owner
 async def remove_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_user.id):
-        await update.message.reply_text("❌ Bu buyruq faqat bot egasi uchun!")
-        return
-
-    args = context.args if context.args else update.message.text.split()[1:]
+    args = context.args or []
     if not args:
         await update.message.reply_text("⚠️ Foydalanish: <code>.removeadmin @user</code>", parse_mode=ParseMode.HTML)
         return
@@ -1360,7 +1445,7 @@ async def remove_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         user = await context.bot.get_chat(f"@{target_username}")
-    except:
+    except Exception:
         await update.message.reply_text(f"❌ {target_username} topilmadi!")
         return
 
@@ -1395,7 +1480,7 @@ async def chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             try:
                 try:
                     member_count = await context.bot.get_chat_member_count(chat.id)
-                except:
+                except Exception:
                     member_count = "?"
 
                 text = settings.welcome_text
@@ -1420,7 +1505,7 @@ async def chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                     permissions=ChatPermissions(can_send_messages=False),
                     until_date=until_date
                 )
-            except:
+            except Exception:
                 pass
 
     elif old_member.status in ['member', 'administrator'] and new_member.status in ['left', 'kicked']:
@@ -1439,7 +1524,7 @@ async def chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 logger.error(f"Goodbye xatosi: {e}")
 
 # ---------------------------------------------------------------------------
-# Xabarlarni filtrash (taqiqlangan so'z / link)
+# Xabarlarni filtrash (taqiqlangan so'z / link) — adminlarga tegmaydi
 # ---------------------------------------------------------------------------
 
 async def apply_message_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1456,13 +1541,13 @@ async def apply_message_filter(update: Update, context: ContextTypes.DEFAULT_TYP
         if settings.delete_banned:
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
-            except:
+            except Exception:
                 pass
 
         if settings.notify_admin:
-            await update.message.reply_text(
-                f"🚫 <b>Taqiqlangan so'z</b>\n"
-                f"{mention(user)} taqiqlangan so'z ishlatdi!",
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"🚫 <b>Taqiqlangan so'z</b>\n{mention(user)} taqiqlangan so'z ishlatdi!",
                 parse_mode=ParseMode.HTML
             )
 
@@ -1486,13 +1571,13 @@ async def apply_message_filter(update: Update, context: ContextTypes.DEFAULT_TYP
         if settings.delete_banned:
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
-            except:
+            except Exception:
                 pass
 
         if settings.notify_admin:
-            await update.message.reply_text(
-                f"🔗 <b>Link</b>\n"
-                f"{mention(user)} link yubordi!",
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"🔗 <b>Link</b>\n{mention(user)} link yubordi!",
                 parse_mode=ParseMode.HTML
             )
 
@@ -1541,8 +1626,8 @@ DOT_COMMANDS = {
 # ---------------------------------------------------------------------------
 # Yagona matn handleri: avval dot-komanda ekanini tekshiradi,
 # bo'lmasa taqiqlangan so'z/link filtriga o'tkazadi.
-# ESKI KODDA BU IKKISI ALOHIDA MessageHandler EDI VA BIR-BIRINI
-# BLOKLAB QO'YAR EDI - shuning uchun .komandalar ishlamas edi.
+# Har bir buyruqning o'zida (require_admin / require_owner / only_group)
+# huquq tekshiruvi bo'lgani uchun bu yerda qo'shimcha tekshirish shart emas.
 # ---------------------------------------------------------------------------
 
 async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
