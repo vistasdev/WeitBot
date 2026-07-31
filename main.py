@@ -512,6 +512,28 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user = update.effective_user
+
+    # Guruhdan "⚙️ Shaxsiy chatda ochish" tugmasi orqali kelingan bo'lsa —
+    # to'g'ridan-to'g'ri o'sha guruhning sozlamalar panelini ochamiz.
+    args = context.args or []
+    if args and args[0].startswith("settings_"):
+        raw_chat_id = args[0][len("settings_"):]
+        try:
+            target_chat_id = int(raw_chat_id)
+        except ValueError:
+            target_chat_id = None
+
+        if not is_admin(user.id):
+            await update.message.reply_text("❌ Sozlamalarni faqat adminlar boshqara oladi.")
+            return
+        if target_chat_id is None:
+            await update.message.reply_text("❌ Havola noto'g'ri. Guruhda qaytadan <code>.settings</code> deb yozing.", parse_mode=ParseMode.HTML)
+            return
+
+        context.user_data["settings_chat_id"] = target_chat_id
+        await render_settings_menu(update, context, target_chat_id)
+        return
+
     first_name = user.first_name or "Foydalanuvchi"
     level = get_level(user.id)
 
@@ -526,10 +548,9 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
     ]
 
-    # Faqat adminlarga ko'rinadigan tugmalar
+    # Faqat adminlarga ko'rinadigan tugma
     if is_admin(user.id):
         keyboard.append([
-            InlineKeyboardButton("⚙️ Sozlamalar", callback_data="settings"),
             InlineKeyboardButton("👥 Adminlar", callback_data="admins"),
         ])
 
@@ -540,6 +561,11 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     role_line = f"🎖 Sizning darajangiz: <b>{rank_name(level)}</b>\n\n" if is_admin(user.id) else ""
+    settings_hint = (
+        "\n⚙️ Guruh sozlamalarini boshqarish uchun o'sha guruhda <code>.settings</code> deb yozing — "
+        "men sizga shu yerga (shaxsiy chatga) havola yuboraman.\n"
+        if is_admin(user.id) else ""
+    )
 
     text = (
         f"🎯 <b>Assalomu alaykum, {first_name}!</b>\n\n"
@@ -553,7 +579,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ Link bloklash\n"
         "✅ Spam himoyasi\n"
         "✅ Ogohlantirish tizimi\n"
-        "✅ CS 1.6 server ma'lumotlari\n\n"
+        "✅ CS 1.6 server ma'lumotlari\n"
+        f"{settings_hint}\n"
         "💡 Guruhga qo'shib, meni <b>ADMIN</b> qiling!\n"
         "📋 Barcha buyruqlar uchun: <code>.help</code>"
     )
@@ -683,11 +710,14 @@ async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ---------------------------------------------------------------------------
-# .settings - faqat adminlar
+# .settings - faqat botning SHAXSIY chatida ishlaydi. Guruhda yozilsa,
+# adminga shaxsiy chatga o'tuvchi havola beriladi (guruh sozlamalar bilan
+# to'lib qolmasligi uchun).
 # ---------------------------------------------------------------------------
 
-@require_admin
-async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def render_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    context.user_data["settings_chat_id"] = chat_id
+
     keyboard = [
         [InlineKeyboardButton("👋 Salomlashish", callback_data="settings_welcome")],
         [InlineKeyboardButton("🚫 Taqiqlangan so'zlar", callback_data="settings_banned_words")],
@@ -696,7 +726,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("⚠️ Ogohlantirish tizimi", callback_data="settings_warns")],
         [InlineKeyboardButton("🆕 Yangi a'zolar", callback_data="settings_new_users")],
         [InlineKeyboardButton("📊 Joriy holat", callback_data="settings_status")],
-        [InlineKeyboardButton("🔙 Orqaga", callback_data="settings_back")]
+        [InlineKeyboardButton("🔙 Bosh menyu", callback_data="settings_back")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -710,6 +740,38 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
     else:
         await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+
+@require_admin
+async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        chat_id = update.effective_chat.id
+        keyboard = [
+            [InlineKeyboardButton(
+                "⚙️ Shaxsiy chatda ochish",
+                url=f"https://t.me/{context.bot.username}?start=settings_{chat_id}"
+            )]
+        ]
+        await update.effective_message.reply_text(
+            "⚙️ <b>Sozlamalar endi shaxsiy chatda boshqariladi</b>\n\n"
+            "Guruhni ortiqcha xabarlar bilan to'ldirmaslik uchun sozlamalar paneli botning "
+            "shaxsiy chatiga ko'chirildi. Pastdagi tugmani bosing.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    # Shaxsiy chat: oldin biror guruhdan havola orqali kirilganmi tekshiramiz
+    chat_id = context.user_data.get("settings_chat_id")
+    if chat_id is None:
+        await update.effective_message.reply_text(
+            "⚠️ Qaysi guruh sozlamalarini ochish kerakligini bilmayapman.\n"
+            "Iltimos, kerakli guruhda <code>.settings</code> deb yozing — men sizga shu yerga "
+            "(shaxsiy chatga) to'g'ridan-to'g'ri havola yuboraman.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    await render_settings_menu(update, context, chat_id)
 
 # ---------------------------------------------------------------------------
 # Settings callback handler - har bosishda admin ekanligi qayta tekshiriladi
@@ -776,9 +838,13 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("❌ Bu tugma faqat adminlar uchun.", show_alert=True)
         return
 
+    chat_id = context.user_data.get("settings_chat_id")
+    if chat_id is None:
+        await query.answer("❌ Sessiya tugadi. Guruhda .settings deb qaytadan yozing.", show_alert=True)
+        return
+
     await query.answer()
 
-    chat_id = update.effective_chat.id
     settings = load_settings(chat_id)
     data = query.data
     message = query.message
