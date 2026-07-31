@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 CS 1.6 Server uchun FULL Telegram Bot
-Versiya: 3.3 - a2s tuzatilgan
+Versiya: 3.4 - To'liq tuzatilgan
 """
 
 import json
@@ -18,7 +18,6 @@ from typing import List
 from dataclasses import dataclass, asdict, field
 
 import a2s
-from a2s import a2s_info, a2s_players
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.constants import ChatType, ParseMode
 from telegram.ext import (
@@ -211,10 +210,9 @@ def mention(user) -> str:
     return f'<a href="tg://user?id={user.id}">{name}</a>'
 
 def get_server_info():
-    """Server ma'lumotlarini olish - TO'G'RI a2s bilan"""
+    """Server ma'lumotlarini olish"""
     address = (config.SERVER_IP, config.SERVER_PORT)
     try:
-        # To'g'ri usul - a2s.info va a2s.players
         info = a2s.info(address, timeout=3.0)
         players = []
         try:
@@ -355,7 +353,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
 
 # ---------------------------------------------------------------------------
-# Settings callback handler - QISQARTIRILGAN
+# Settings callback handler
 # ---------------------------------------------------------------------------
 
 async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -580,7 +578,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await settings_callback(update, context)
 
 # ---------------------------------------------------------------------------
-# /info - TUZATILGAN
+# /info
 # ---------------------------------------------------------------------------
 
 async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -636,7 +634,7 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(text, parse_mode=ParseMode.HTML)
 
 # ---------------------------------------------------------------------------
-# /ping - TUZATILGAN
+# /ping
 # ---------------------------------------------------------------------------
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -732,6 +730,7 @@ async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 
 async def resolve_target(update: Update, context: ContextTypes.DEFAULT_TYPE, args: list[str]):
+    """Target foydalanuvchini aniqlash"""
     if update.message.reply_to_message and update.message.reply_to_message.from_user:
         return update.message.reply_to_message.from_user, args
     if not args:
@@ -757,13 +756,20 @@ async def resolve_target(update: Update, context: ContextTypes.DEFAULT_TYPE, arg
             d.first_name = first
             d.username = None
             return d, rest
-    return None, Nonedef only_group(func):
+    return None, None
+
+def only_group(func):
+    """Faqat guruhlarda ishlaydigan buyruqlar uchun dekorator"""
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
             await update.message.reply_text("❌ Bu buyruq faqat guruhlarda ishlaydi.")
             return
         return await func(update, context)
     return wrapper
+
+# ---------------------------------------------------------------------------
+# BAN
+# ---------------------------------------------------------------------------
 
 @only_group
 async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -814,6 +820,10 @@ async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML,
     )
 
+# ---------------------------------------------------------------------------
+# KICK
+# ---------------------------------------------------------------------------
+
 @only_group
 async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     actor = update.effective_user
@@ -845,6 +855,10 @@ async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👮 Admin: {mention(actor)}",
         parse_mode=ParseMode.HTML,
     )
+
+# ---------------------------------------------------------------------------
+# MUTE
+# ---------------------------------------------------------------------------
 
 @only_group
 async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -896,6 +910,10 @@ async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML,
     )
 
+# ---------------------------------------------------------------------------
+# UNMUTE
+# ---------------------------------------------------------------------------
+
 @only_group
 async def unmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     actor = update.effective_user
@@ -932,6 +950,10 @@ async def unmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👮 Admin: {mention(actor)}",
         parse_mode=ParseMode.HTML,
     )
+
+# ---------------------------------------------------------------------------
+# WARN
+# ---------------------------------------------------------------------------
 
 @only_group
 async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1015,6 +1037,10 @@ async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
 
+# ---------------------------------------------------------------------------
+# WARNS
+# ---------------------------------------------------------------------------
+
 @only_group
 async def warns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args if context.args else update.message.text.split()[1:]
@@ -1044,6 +1070,10 @@ async def warns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
+# ---------------------------------------------------------------------------
+# CLEAR WARNS
+# ---------------------------------------------------------------------------
+
 @only_group
 async def clear_warns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     actor = update.effective_user
@@ -1071,6 +1101,10 @@ async def clear_warns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML
     )
 
+# ---------------------------------------------------------------------------
+# PIN
+# ---------------------------------------------------------------------------
+
 @only_group
 async def pin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     actor = update.effective_user
@@ -1090,6 +1124,10 @@ async def pin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📌 Xabar pin qilindi.")
     except Exception as e:
         await update.message.reply_text(f"❌ Pin qilib bo'lmadi: {e}")
+
+# ---------------------------------------------------------------------------
+# DELETE
+# ---------------------------------------------------------------------------
 
 @only_group
 async def del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
