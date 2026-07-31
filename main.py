@@ -1,16 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 CS 1.6 Server uchun FULL Telegram Bot
-Versiya: 3.0
-
-Funksiyalar:
-- Guruh sozlamalari (settings)
-- Avtomatik salomlashish va xayrlashish
-- Taqiqlangan so'zlar va linklar
-- Avtomatik warn va mute
-- Spam himoyasi
-- Admin panel
-- CS 1.6 server holati
+Versiya: 3.1 - Tuzatilgan
 """
 
 import json
@@ -23,13 +14,11 @@ import uvicorn
 import threading
 import asyncio
 import time
-from typing import Dict, List, Optional, Set
+from typing import List
 from dataclasses import dataclass, asdict, field
-from collections import defaultdict
-import hashlib
 
 import a2s
-from telegram import Update, Chat, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.constants import ChatType, ParseMode
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, 
@@ -76,7 +65,7 @@ class GroupSettings:
     warn_limit: int = 3
     mute_on_warn: bool = True
     ban_on_warn: bool = False
-    banned_words: List[str] = field(default_factory=lambda: ["fuck", "shit", "asshole"])
+    banned_words: List[str] = field(default_factory=lambda: [])
     banned_links: bool = True
     spam_protection: bool = True
     spam_limit: int = 5
@@ -85,24 +74,6 @@ class GroupSettings:
     notify_admin: bool = True
     restrict_new: bool = False
     captcha_enabled: bool = False
-
-@dataclass 
-class WarnData:
-    user_id: int
-    reason: str
-    admin_id: int
-    admin_name: str
-    date: str
-    warn_id: int
-
-@dataclass
-class UserData:
-    warns: List[WarnData] = field(default_factory=list)
-    total_warns: int = 0
-    message_count: int = 0
-    first_message_time: float = 0
-    is_muted: bool = False
-    mute_until: float = 0
 
 @dataclass
 class Stats:
@@ -170,13 +141,6 @@ def load_stats() -> dict:
 
 def save_stats(data: dict) -> None:
     save_json("stats.json", data)
-
-def load_users(chat_id: int) -> dict:
-    data = load_json(f"users_{chat_id}.json", {})
-    return {k: UserData(**v) if isinstance(v, dict) else v for k, v in data.items()}
-
-def save_users(chat_id: int, data: dict) -> None:
-    save_json(f"users_{chat_id}.json", {k: asdict(v) if isinstance(v, UserData) else v for k, v in data.items()})
 
 def get_level(user_id: int) -> int:
     if user_id == config.OWNER_ID:
@@ -246,12 +210,14 @@ def mention(user) -> str:
     return f'<a href="tg://user?id={user.id}">{name}</a>'
 
 def get_server_info():
+    """Server ma'lumotlarini olish - a2s kutubxonasi uchun to'g'ri"""
     address = (config.SERVER_IP, config.SERVER_PORT)
     try:
-        info = a2s.info(address, timeout=3.0)
+        # a2s.info o'rniga a2s.a2s_info ishlatamiz
+        info = a2s.a2s_info(address, timeout=3.0)
         players = []
         try:
-            players = a2s.players(address, timeout=3.0)
+            players = a2s.a2s_players(address, timeout=3.0)
         except:
             pass
         return info, players
@@ -347,18 +313,17 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <code>.warns @user</code> - Ogohlantirishlar\n"
         "• <code>.clearwarns @user</code> - Tozalash\n"
         "• <code>.pin</code> (reply) - Pin qilish\n"
-        "• <code>.del</code> (reply) - O'chirish\n\n"
-        "⚙️ <b>Sozlamalar:</b>\n"
-        "• <code>/settings</code> - Barcha sozlamalarni ko'rish va o'zgartirish\n\n"
+        "• <code>.del</code> (reply) - O'chirish\n"
+        "• <code>.addword so'z</code> - Taqiqlangan so'z qo'shish\n"
+        "• <code>.delword so'z</code> - Taqiqlangan so'z o'chirish\n\n"
         "👑 <b>Bot egasi buyruqlari:</b>\n"
         "• <code>.addadmin @user level</code> - Admin qo'shish\n"
-        "• <code>.removeadmin @user</code> - Admin o'chirish\n"
-        "• <code>.broadcast xabar</code> - Barcha guruhlarga xabar"
+        "• <code>.removeadmin @user</code> - Admin o'chirish"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # ---------------------------------------------------------------------------
-# /settings - Guruh sozlamalari
+# /settings
 # ---------------------------------------------------------------------------
 
 async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -367,8 +332,6 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ Bu buyruq faqat adminlar uchun!")
         return
-    
-    settings = load_settings(chat_id)
     
     keyboard = [
         [InlineKeyboardButton("👋 Salomlashish", callback_data="settings_welcome")],
@@ -391,7 +354,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
 
 # ---------------------------------------------------------------------------
-# Settings callback handler
+# Settings callback handler - TUZATILGAN
 # ---------------------------------------------------------------------------
 
 async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -401,6 +364,9 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     settings = load_settings(chat_id)
     data = query.data
+    
+    # callback_query dan message olish
+    message = query.message
     
     if data == "settings_welcome":
         text = (
@@ -418,10 +384,9 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [InlineKeyboardButton("🔄 Salomlashish", callback_data="settings_welcome_toggle")],
             [InlineKeyboardButton("🔄 Xayrlashish", callback_data="settings_goodbye_toggle")],
-            [InlineKeyboardButton("✏️ Matnni o'zgartirish", callback_data="settings_welcome_text")],
             [InlineKeyboardButton("🔙 Orqaga", callback_data="settings")]
         ]
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif data == "settings_welcome_toggle":
         settings.welcome_enabled = not settings.welcome_enabled
@@ -451,7 +416,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [InlineKeyboardButton("🔙 Orqaga", callback_data="settings")]
         ]
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif data == "settings_links":
         text = (
@@ -467,7 +432,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔄 Admin xabari", callback_data="settings_notify_toggle")],
             [InlineKeyboardButton("🔙 Orqaga", callback_data="settings")]
         ]
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif data == "settings_links_toggle":
         settings.banned_links = not settings.banned_links
@@ -498,7 +463,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔇 Avtomatik mute", callback_data="settings_auto_mute")],
             [InlineKeyboardButton("🔙 Orqaga", callback_data="settings")]
         ]
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif data == "settings_spam_toggle":
         settings.spam_protection = not settings.spam_protection
@@ -524,7 +489,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔨 Ban qilish", callback_data="settings_warn_ban")],
             [InlineKeyboardButton("🔙 Orqaga", callback_data="settings")]
         ]
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif data == "settings_warn_mute":
         settings.mute_on_warn = not settings.mute_on_warn
@@ -551,7 +516,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔄 Captcha", callback_data="settings_captcha")],
             [InlineKeyboardButton("🔙 Orqaga", callback_data="settings")]
         ]
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif data == "settings_auto_mute_new":
         settings.auto_mute_new = not settings.auto_mute_new
@@ -584,19 +549,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [InlineKeyboardButton("🔙 Orqaga", callback_data="settings")]
         ]
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
-    
-    elif data == "settings_welcome_text":
-        context.user_data['setting_text'] = 'welcome'
-        await query.edit_message_text(
-            "✏️ <b>Salomlashish matnini yozing</b>\n\n"
-            "📌 O'zgaruvchilar:\n"
-            "<code>{user}</code> - Foydalanuvchi ismi\n"
-            "<code>{group}</code> - Guruh nomi\n"
-            "<code>{count}</code> - A'zolar soni\n\n"
-            "💡 Matnni yuboring:",
-            parse_mode=ParseMode.HTML
-        )
+        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif data == "settings":
         await settings_cmd(update, context)
@@ -605,7 +558,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_cmd(update, context)
 
 # ---------------------------------------------------------------------------
-# Inline button handler
+# Inline button handler - TUZATILGAN
 # ---------------------------------------------------------------------------
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -628,18 +581,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await settings_callback(update, context)
 
 # ---------------------------------------------------------------------------
-# /info
+# /info - TUZATILGAN a2s bilan
 # ---------------------------------------------------------------------------
 
 async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.effective_message.reply_text("⏳ Server holati tekshirilmoqda...")
+    # Agar callback dan kelgan bo'lsa
+    if update.callback_query:
+        message = update.callback_query.message
+        await message.edit_text("⏳ Server holati tekshirilmoqda...")
+        msg = message
+    else:
+        msg = await update.effective_message.reply_text("⏳ Server holati tekshirilmoqda...")
     
     info, players = get_server_info()
     
     if not info:
         await msg.edit_text(
             f"❌ Serverga ulanib bo'lmadi.\n"
-            f"🌐 IP: <code>{config.SERVER_IP}:{config.SERVER_PORT}</code>",
+            f"🌐 IP: <code>{config.SERVER_IP}:{config.SERVER_PORT}</code>\n"
+            f"💡 Server ishlayaptimi va port ochiqmi tekshiring!",
             parse_mode=ParseMode.HTML,
         )
         return
@@ -678,17 +638,22 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(text, parse_mode=ParseMode.HTML)
 
 # ---------------------------------------------------------------------------
-# /ping
+# /ping - TUZATILGAN a2s bilan
 # ---------------------------------------------------------------------------
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.effective_message.reply_text("⏳ Ping tekshirilmoqda...")
+    if update.callback_query:
+        message = update.callback_query.message
+        await message.edit_text("⏳ Ping tekshirilmoqda...")
+        msg = message
+    else:
+        msg = await update.effective_message.reply_text("⏳ Ping tekshirilmoqda...")
     
     address = (config.SERVER_IP, config.SERVER_PORT)
     start_time = time.time()
     
     try:
-        info = a2s.info(address, timeout=3.0)
+        info = a2s.a2s_info(address, timeout=3.0)
         end_time = time.time()
         ping_ms = int((end_time - start_time) * 1000)
         
@@ -717,7 +682,8 @@ async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await msg.edit_text(
             f"❌ Serverga ping yuborib bo'lmadi!\n"
-            f"🌐 IP: <code>{config.SERVER_IP}:{config.SERVER_PORT}</code>",
+            f"🌐 IP: <code>{config.SERVER_IP}:{config.SERVER_PORT}</code>\n"
+            f"⚠️ Xato: {str(e)}",
             parse_mode=ParseMode.HTML
         )
 
@@ -728,6 +694,11 @@ async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_admins()
     admins = data.get("admins", {})
+    
+    if update.callback_query:
+        message = update.callback_query.message
+    else:
+        message = update.effective_message
     
     text = "👑 <b>Adminlar ro'yxati</b>\n"
     text += "━━━━━━━━━━━━━━━━━━\n\n"
@@ -753,10 +724,14 @@ async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text += f"   ID: <code>{user_id}</code>\n"
                 text += f"   Daraja: <b>{level}</b>\n\n"
     
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+    if update.callback_query:
+        await message.edit_text(text, parse_mode=ParseMode.HTML)
+    else:
+        await message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # ---------------------------------------------------------------------------
-# Admin buyruqlar# ---------------------------------------------------------------------------
+# Admin buyruqlar
+# ---------------------------------------------------------------------------
 
 async def resolve_target(update: Update, context: ContextTypes.DEFAULT_TYPE, args: list[str]):
     if update.message.reply_to_message and update.message.reply_to_message.from_user:
@@ -793,10 +768,6 @@ def only_group(func):
             return
         return await func(update, context)
     return wrapper
-
-# ---------------------------------------------------------------------------
-# ADMIN COMMANDS
-# ---------------------------------------------------------------------------
 
 @only_group
 async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -838,11 +809,6 @@ async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ban qilib bo'lmadi: {e}")
         return
     
-    stats = load_stats()
-    stats['total_bans'] = stats.get('total_bans', 0) + 1
-    stats['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    save_stats(stats)
-    
     await update.message.reply_text(
         f"🔨 <b>BAN QILINDI</b>\n"
         f"👤 Kim: {mention(target)}\n"
@@ -875,11 +841,6 @@ async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Kick qilib bo'lmadi: {e}")
         return
-    
-    stats = load_stats()
-    stats['total_kicks'] = stats.get('total_kicks', 0) + 1
-    stats['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    save_stats(stats)
     
     await update.message.reply_text(
         f"👢 <b>KICK QILINDI</b>\n"
@@ -929,11 +890,6 @@ async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Mute qilib bo'lmadi: {e}")
         return
-    
-    stats = load_stats()
-    stats['total_mutes'] = stats.get('total_mutes', 0) + 1
-    stats['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    save_stats(stats)
     
     await update.message.reply_text(
         f"🔇 <b>MUTE QILINDI</b>\n"
@@ -1019,11 +975,6 @@ async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     warns_data[user_id_str]["warns"].append(warn)
     warns_data[user_id_str]["total_warns"] += 1
     save_warns(warns_data)
-    
-    stats = load_stats()
-    stats['total_warns'] = stats.get('total_warns', 0) + 1
-    stats['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    save_stats(stats)
     
     settings = load_settings(update.effective_chat.id)
     total_warns = warns_data[user_id_str]["total_warns"]
@@ -1168,7 +1119,7 @@ async def del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ O'chirib bo'lmadi: {e}")
 
 # ---------------------------------------------------------------------------
-# So'z qo'shish/o'chirish buyruqlari
+# So'z qo'shish/o'chirish
 # ---------------------------------------------------------------------------
 
 @only_group
@@ -1307,50 +1258,6 @@ async def message_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     settings = load_settings(chat_id)
-    users_data = load_users(chat_id)
-    user_id_str = str(user.id)
-    
-    if user_id_str not in users_data:
-        users_data[user_id_str] = UserData()
-    
-    if settings.spam_protection:
-        current_time = time.time()
-        user_data = users_data[user_id_str]
-        
-        if current_time - user_data.first_message_time < settings.spam_time:
-            user_data.message_count += 1
-            if user_data.message_count >= settings.spam_limit:
-                try:
-                    await context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
-                except:
-                    pass
-                
-                if settings.mute_on_warn:
-                    until_date = datetime.now(timezone.utc) + timedelta(minutes=settings.mute_duration)
-                    try:
-                        await context.bot.restrict_chat_member(
-                            chat_id=chat_id,
-                            user_id=user.id,
-                            permissions=ChatPermissions(can_send_messages=False),
-                            until_date=until_date
-                        )
-                        await update.message.reply_text(
-                            f"🔇 <b>SPAM</b>\n"
-                            f"{mention(user)} spam uchun {settings.mute_duration} daqiqaga mute qilindi!",
-                            parse_mode=ParseMode.HTML
-                        )
-                    except:
-                        pass
-                
-                user_data.message_count = 0
-                user_data.first_message_time = 0
-                save_users(chat_id, users_data)
-                return
-        else:
-            user_data.message_count = 1
-            user_data.first_message_time = current_time
-        
-        save_users(chat_id, users_data)
     
     if settings.banned_words and has_banned_words(text, settings.banned_words):
         if settings.delete_banned:
@@ -1367,39 +1274,19 @@ async def message_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         
         warns_data = load_warns()
+        user_id_str = str(user.id)
         if user_id_str not in warns_data:
             warns_data[user_id_str] = {"warns": [], "total_warns": 0}
         
-        warn = {
+        warns_data[user_id_str]["warns"].append({
             "reason": "Taqiqlangan so'z ishlatish",
             "admin_id": user.id,
             "admin_name": "Bot (avtomatik)",
             "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "warn_id": len(warns_data[user_id_str]["warns"]) + 1
-        }
-        warns_data[user_id_str]["warns"].append(warn)
+        })
         warns_data[user_id_str]["total_warns"] += 1
         save_warns(warns_data)
-        
-        total_warns = warns_data[user_id_str]["total_warns"]
-        if total_warns >= settings.warn_limit:
-            if settings.ban_on_warn:
-                try:
-                    await context.bot.ban_chat_member(chat_id=chat_id, user_id=user.id)
-                except:
-                    pass
-            elif settings.mute_on_warn:
-                until_date = datetime.now(timezone.utc) + timedelta(minutes=settings.mute_duration)
-                try:
-                    await context.bot.restrict_chat_member(
-                        chat_id=chat_id,
-                        user_id=user.id,
-                        permissions=ChatPermissions(can_send_messages=False),
-                        until_date=until_date
-                    )
-                except:
-                    pass
-        
         return
     
     if settings.banned_links and has_links(text):
@@ -1417,20 +1304,19 @@ async def message_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         
         warns_data = load_warns()
+        user_id_str = str(user.id)
         if user_id_str not in warns_data:
             warns_data[user_id_str] = {"warns": [], "total_warns": 0}
         
-        warn = {
+        warns_data[user_id_str]["warns"].append({
             "reason": "Link yuborish",
             "admin_id": user.id,
             "admin_name": "Bot (avtomatik)",
             "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "warn_id": len(warns_data[user_id_str]["warns"]) + 1
-        }
-        warns_data[user_id_str]["warns"].append(warn)
+        })
         warns_data[user_id_str]["total_warns"] += 1
         save_warns(warns_data)
-        
         return
 
 # ---------------------------------------------------------------------------
@@ -1480,20 +1366,6 @@ async def chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                     user_id=user.id,
                     permissions=ChatPermissions(can_send_messages=False),
                     until_date=until_date
-                )
-            except:
-                pass
-        
-        if settings.restrict_new:
-            try:
-                await context.bot.restrict_chat_member(
-                    chat_id=chat.id,
-                    user_id=user.id,
-                    permissions=ChatPermissions(
-                        can_send_messages=False,
-                        can_send_media_messages=False,
-                        can_send_other_messages=False
-                    )
                 )
             except:
                 pass
