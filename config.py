@@ -5,11 +5,11 @@ BOT_TOKEN va OWNER_ID ni albatta o'zingiznikiga almashtiring!
 """
 
 # @BotFather dan olingan token
-BOT_TOKEN = "BOT_TOKEN_BU_YERGA"
+BOT_TOKEN = "8955675821:AAGo0QL_q83BqozpSgP7wT3LK9_TzvYx3ao"
 
 # Sizning Telegram user_id raqamingiz (bot egasi).
 # Buni bilish uchun @userinfobot ga /start yozing.
-OWNER_ID = 000000000
+OWNER_ID = 6141183218
 
 # CS 1.6 server manzili
 SERVER_IP = "84.54.82.234"
