@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 CS 1.6 Server uchun FULL Telegram Bot
-Versiya: 3.4 - To'liq tuzatilgan
+Versiya: 3.4 - To'liq tuzatilgan + DEBUG endpoint
 """
 
 import json
@@ -14,6 +14,7 @@ import uvicorn
 import threading
 import asyncio
 import time
+import socket
 from typing import List
 from dataclasses import dataclass, asdict, field
 
@@ -41,6 +42,49 @@ async def root_head():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+# ---------------------------------------------------------------------------
+# DEBUG endpoint - server ulanish muammosini aniqlash uchun
+# ---------------------------------------------------------------------------
+
+@app.get("/debug-server")
+async def debug_server():
+    result = {"ip": config.SERVER_IP, "port": config.SERVER_PORT}
+
+    # 1. Raw UDP socket testi (a2s kutubxonasisiz, sof tarmoq holatini ko'rish uchun)
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(4.0)
+        sock.sendto(b"\xFF\xFF\xFF\xFFTSource Engine Query\x00", (config.SERVER_IP, config.SERVER_PORT))
+        data, addr = sock.recvfrom(4096)
+        result["raw_udp"] = f"OK, {len(data)} bytes qaytdi, addr={addr}"
+        sock.close()
+    except Exception as e:
+        result["raw_udp"] = f"XATO: {type(e).__name__}: {e}"
+
+    # 2. a2s kutubxonasi orqali (info)
+    try:
+        info = a2s.info((config.SERVER_IP, config.SERVER_PORT), timeout=5.0)
+        result["a2s_info"] = f"OK: {info.server_name} | map={info.map_name} | players={info.player_count}/{info.max_players}"
+    except Exception as e:
+        result["a2s_info"] = f"XATO: {type(e).__name__}: {e}"
+
+    # 3. a2s kutubxonasi orqali (players)
+    try:
+        players = a2s.players((config.SERVER_IP, config.SERVER_PORT), timeout=5.0)
+        result["a2s_players"] = f"OK: {len(players)} ta o'yinchi"
+    except Exception as e:
+        result["a2s_players"] = f"XATO: {type(e).__name__}: {e}"
+
+    # 4. Renderning chiquvchi (outbound) IP manzilini ko'rsatish - bloklanganini tekshirish uchun foydali
+    try:
+        import urllib.request
+        with urllib.request.urlopen("https://api.ipify.org", timeout=4.0) as resp:
+            result["render_outbound_ip"] = resp.read().decode().strip()
+    except Exception as e:
+        result["render_outbound_ip"] = f"XATO: {type(e).__name__}: {e}"
+
+    return result
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
