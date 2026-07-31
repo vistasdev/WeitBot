@@ -115,6 +115,14 @@ class GroupSettings:
     notify_admin: bool = True
     restrict_new: bool = False
     captcha_enabled: bool = False
+    # Taqiqlangan so'z uchun jazo: none | warn | mute | kick | ban
+    word_action: str = "warn"
+    word_mute_minutes: int = 15
+    word_ban_duration: str = "doimiy"
+    # Link yuborgani uchun jazo: none | warn | mute | kick | ban
+    link_action: str = "warn"
+    link_mute_minutes: int = 15
+    link_ban_duration: str = "doimiy"
 
 @dataclass
 class Stats:
@@ -185,6 +193,23 @@ def load_stats() -> dict:
 
 def save_stats(data: dict) -> None:
     save_json("stats.json", data)
+
+# ---------------------------------------------------------------------------
+# Jazo turlari (taqiqlangan so'z / link uchun) - to'liq sozlanadigan
+# ---------------------------------------------------------------------------
+
+ACTION_ORDER = ["none", "warn", "mute", "kick", "ban"]
+ACTION_LABELS = {
+    "none": "🚫 Faqat xabarni o'chirish",
+    "warn": "⚠️ Ogohlantirish berish",
+    "mute": "🔇 Mute qilish",
+    "kick": "👢 Kick qilish",
+    "ban": "🔨 Ban qilish",
+}
+
+def next_action(current: str) -> str:
+    idx = ACTION_ORDER.index(current) if current in ACTION_ORDER else 0
+    return ACTION_ORDER[(idx + 1) % len(ACTION_ORDER)]
 
 # ---------------------------------------------------------------------------
 # Rol / darajalarni aniqlash (xavfsizlikning yuragi shu yerda)
@@ -331,6 +356,152 @@ def has_links(text: str) -> bool:
     url_pattern = re.compile(r'https?://\S+|www\.\S+|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:/\S*)?')
     return bool(url_pattern.search(text))
 
+def add_warn_record(warns_data: dict, user_id: int, reason: str, admin_id: int, admin_name: str) -> int:
+    """Warns bazasiga yozuv qo'shadi va jami warnlar sonini qaytaradi."""
+    user_id_str = str(user_id)
+    if user_id_str not in warns_data:
+        warns_data[user_id_str] = {"warns": [], "total_warns": 0}
+
+    warn = {
+        "reason": reason,
+        "admin_id": admin_id,
+        "admin_name": admin_name,
+        "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "warn_id": len(warns_data[user_id_str]["warns"]) + 1,
+    }
+    warns_data[user_id_str]["warns"].append(warn)
+    warns_data[user_id_str]["total_warns"] += 1
+    return warns_data[user_id_str]["total_warns"]
+
+async def apply_warn_limit_consequence(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
+                                        target_user, total_warns: int, settings: GroupSettings):
+    """warn_limit ga yetilganda .settings dagi ban_on_warn/mute_on_warn bo'yicha
+    avtomatik chora ko'radi. Natija: None yoki ("ban", None) / ("mute", daqiqa)."""
+    if total_warns < settings.warn_limit:
+        return None
+    if settings.ban_on_warn:
+        try:
+            await context.bot.ban_chat_member(chat_id=chat_id, user_id=target_user.id)
+            return ("ban", None)
+        except Exception:
+            return None
+    elif settings.mute_on_warn:
+        try:
+            until_date = datetime.now(timezone.utc) + timedelta(minutes=settings.mute_duration)
+            await context.bot.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=target_user.id,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=until_date,
+            )
+            return ("mute", settings.mute_duration)
+        except Exception:
+            return None
+    return None
+
+async def execute_violation_action(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                    settings: GroupSettings, user, kind: str, reason: str):
+    """Taqiqlangan so'z / link aniqlanganda .settings da tanlangan jazoni qo'llaydi:
+    none / warn / mute / kick / ban - har biri to'liq sozlanadigan."""
+    chat_id = update.effective_chat.id
+
+    if settings.delete_banned:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
+        except Exception:
+            pass
+
+    if settings.notify_admin:
+        icon = "🚫" if kind == "word" else "🔗"
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"{icon} <b>{reason}</b>\n👤 Kim: {mention(user)}",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+
+    if kind == "word":
+        action = settings.word_action
+        mute_minutes = settings.word_mute_minutes
+        ban_duration_str = settings.word_ban_duration
+    else:
+        action = settings.link_action
+        mute_minutes = settings.link_mute_minutes
+        ban_duration_str = settings.link_ban_duration
+
+    if action == "none":
+        return
+
+    if action == "warn":
+        warns_data = load_warns()
+        total_warns = add_warn_record(warns_data, user.id, reason, user.id, "Bot (avtomatik)")
+        save_warns(warns_data)
+        consequence = await apply_warn_limit_consequence(context, chat_id, user, total_warns, settings)
+        if consequence:
+            c_kind, c_val = consequence
+            if c_kind == "ban":
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🔨 <b>AVTOMATIK BAN</b>\n{mention(user)} {settings.warn_limit} ta ogohlantirishdan keyin ban qilindi!",
+                    parse_mode=ParseMode.HTML,
+                )
+            elif c_kind == "mute":
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🔇 <b>AVTOMATIK MUTE</b>\n{mention(user)} {settings.warn_limit} ta ogohlantirishdan keyin {c_val} daqiqaga mute qilindi!",
+                    parse_mode=ParseMode.HTML,
+                )
+        return
+
+    if action == "mute":
+        until_date = datetime.now(timezone.utc) + timedelta(minutes=mute_minutes)
+        try:
+            await context.bot.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=user.id,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=until_date,
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"🔇 <b>MUTE QILINDI</b>\n👤 {mention(user)}\n⏱ Muddat: {mute_minutes} daqiqa\n📝 Sabab: {reason}",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        return
+
+    if action == "kick":
+        try:
+            await context.bot.ban_chat_member(chat_id=chat_id, user_id=user.id)
+            await context.bot.unban_chat_member(chat_id=chat_id, user_id=user.id, only_if_banned=True)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"👢 <b>KICK QILINDI</b>\n👤 {mention(user)}\n📝 Sabab: {reason}",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        return
+
+    if action == "ban":
+        duration = parse_duration(ban_duration_str)
+        if duration is False:
+            duration = None
+        until_date = None if duration is None else datetime.now(timezone.utc) + duration
+        try:
+            await context.bot.ban_chat_member(chat_id=chat_id, user_id=user.id, until_date=until_date)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"🔨 <b>BAN QILINDI</b>\n👤 {mention(user)}\n⏱ Muddat: {fmt_duration(duration)}\n📝 Sabab: {reason}",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        return
+
 # ---------------------------------------------------------------------------
 # /start - rolega qarab tugmalar (admin bo'lmasa, admin tugmalari umuman
 # ko'rinmaydi)
@@ -419,7 +590,16 @@ ADMIN_HELP_EXTRA = (
     "• <code>.addword so'z</code> - Taqiqlangan so'z qo'shish\n"
     "• <code>.delword so'z</code> - Taqiqlangan so'z o'chirish\n"
     "• <code>.settings</code> - Guruh sozlamalari\n"
-    "• <code>.admins</code> - Adminlar ro'yxati\n"
+    "• <code>.admins</code> - Adminlar ro'yxati\n\n"
+    "🎨 <b>Moslashtirish:</b>\n"
+    "• <code>.setwelcome matn</code> - Salomlashish matnini o'zgartirish\n"
+    "• <code>.setgoodbye matn</code> - Xayrlashish matnini o'zgartirish\n"
+    "• <code>.setwordaction none|warn|mute|kick|ban</code> - So'z uchun jazo\n"
+    "• <code>.setlinkaction none|warn|mute|kick|ban</code> - Link uchun jazo\n"
+    "• <code>.setwordmute 15</code> - So'z uchun mute (daqiqa)\n"
+    "• <code>.setlinkmute 15</code> - Link uchun mute (daqiqa)\n"
+    "• <code>.setwordban 1d</code> - So'z uchun ban muddati\n"
+    "• <code>.setlinkban 1d</code> - Link uchun ban muddati\n"
 )
 
 OWNER_HELP_EXTRA = (
@@ -537,6 +717,58 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # o'zgartirib qo'yishi mumkin edi)
 # ---------------------------------------------------------------------------
 
+async def render_banned_words_settings(message, settings: GroupSettings):
+    text = (
+        "🚫 <b>Taqiqlangan so'zlar</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "📝 Taqiqlangan so'zlar:\n"
+    )
+    if settings.banned_words:
+        for word in settings.banned_words:
+            text += f"• <code>{word}</code>\n"
+    else:
+        text += "❌ Hech qanday so'z taqiqlanmagan\n\n"
+
+    text += (
+        f"\n⚖️ <b>Jazo turi:</b> {ACTION_LABELS[settings.word_action]}\n"
+        f"🔇 Mute vaqti: <b>{settings.word_mute_minutes}</b> daqiqa\n"
+        f"🔨 Ban muddati: <b>{fmt_duration(parse_duration(settings.word_ban_duration))}</b>\n\n"
+    )
+    text += "➕ So'z qo'shish: <code>.addword so'z</code>\n"
+    text += "➖ So'z o'chirish: <code>.delword so'z</code>\n\n"
+    text += "🔧 <code>.setwordaction none|warn|mute|kick|ban</code>\n"
+    text += "🔧 <code>.setwordmute 15</code> — mute daqiqasi\n"
+    text += "🔧 <code>.setwordban 1d</code> — ban muddati"
+
+    keyboard = [
+        [InlineKeyboardButton(f"🔁 Jazo: {ACTION_LABELS[settings.word_action]}", callback_data="settings_word_action_cycle")],
+        [InlineKeyboardButton("🔙 Orqaga", callback_data="settings")]
+    ]
+    await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def render_links_settings(message, settings: GroupSettings):
+    text = (
+        "🔗 <b>Link bloklash</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"Link bloklash: {'✅ Yoqilgan' if settings.banned_links else '❌ O\'chirilgan'}\n"
+        f"Xabarni o'chirish: {'✅ Ha' if settings.delete_banned else '❌ Yo\'q'}\n"
+        f"Adminni xabardor qilish: {'✅ Ha' if settings.notify_admin else '❌ Yo\'q'}\n\n"
+        f"⚖️ <b>Jazo turi:</b> {ACTION_LABELS[settings.link_action]}\n"
+        f"🔇 Mute vaqti: <b>{settings.link_mute_minutes}</b> daqiqa\n"
+        f"🔨 Ban muddati: <b>{fmt_duration(parse_duration(settings.link_ban_duration))}</b>\n\n"
+        "🔧 <code>.setlinkaction none|warn|mute|kick|ban</code>\n"
+        "🔧 <code>.setlinkmute 15</code> — mute daqiqasi\n"
+        "🔧 <code>.setlinkban 1d</code> — ban muddati"
+    )
+    keyboard = [
+        [InlineKeyboardButton(f"🔁 Jazo: {ACTION_LABELS[settings.link_action]}", callback_data="settings_link_action_cycle")],
+        [InlineKeyboardButton("🔄 Link bloklash", callback_data="settings_links_toggle")],
+        [InlineKeyboardButton("🔄 Xabarni o'chirish", callback_data="settings_delete_toggle")],
+        [InlineKeyboardButton("🔄 Admin xabari", callback_data="settings_notify_toggle")],
+        [InlineKeyboardButton("🔙 Orqaga", callback_data="settings")]
+    ]
+    await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+
 async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
 
@@ -582,40 +814,20 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await settings_callback(update, context)
 
     elif data == "settings_banned_words":
-        text = (
-            "🚫 <b>Taqiqlangan so'zlar</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n\n"
-            "📝 Taqiqlangan so'zlar:\n"
-        )
-        if settings.banned_words:
-            for word in settings.banned_words:
-                text += f"• <code>{word}</code>\n"
-        else:
-            text += "❌ Hech qanday so'z taqiqlanmagan\n\n"
+        await render_banned_words_settings(message, settings)
 
-        text += "\n➕ So'z qo'shish: <code>.addword so'z</code>\n"
-        text += "➖ So'z o'chirish: <code>.delword so'z</code>"
-
-        keyboard = [
-            [InlineKeyboardButton("🔙 Orqaga", callback_data="settings")]
-        ]
-        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+    elif data == "settings_word_action_cycle":
+        settings.word_action = next_action(settings.word_action)
+        save_settings(chat_id, settings)
+        await render_banned_words_settings(message, settings)
 
     elif data == "settings_links":
-        text = (
-            "🔗 <b>Link bloklash</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n\n"
-            f"Link bloklash: {'✅ Yoqilgan' if settings.banned_links else '❌ O\'chirilgan'}\n"
-            f"Xabarni o'chirish: {'✅ Ha' if settings.delete_banned else '❌ Yo\'q'}\n"
-            f"Adminni xabardor qilish: {'✅ Ha' if settings.notify_admin else '❌ Yo\'q'}"
-        )
-        keyboard = [
-            [InlineKeyboardButton("🔄 Link bloklash", callback_data="settings_links_toggle")],
-            [InlineKeyboardButton("🔄 Xabarni o'chirish", callback_data="settings_delete_toggle")],
-            [InlineKeyboardButton("🔄 Admin xabari", callback_data="settings_notify_toggle")],
-            [InlineKeyboardButton("🔙 Orqaga", callback_data="settings")]
-        ]
-        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+        await render_links_settings(message, settings)
+
+    elif data == "settings_link_action_cycle":
+        settings.link_action = next_action(settings.link_action)
+        save_settings(chat_id, settings)
+        await render_links_settings(message, settings)
 
     elif data == "settings_links_toggle":
         settings.banned_links = not settings.banned_links
@@ -1165,27 +1377,13 @@ async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     reason = " ".join(rest)
+    chat_id = update.effective_chat.id
 
     warns_data = load_warns()
-    user_id_str = str(target.id)
-
-    if user_id_str not in warns_data:
-        warns_data[user_id_str] = {"warns": [], "total_warns": 0}
-
-    warn = {
-        "reason": reason,
-        "admin_id": actor.id,
-        "admin_name": actor.first_name or str(actor.id),
-        "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "warn_id": len(warns_data[user_id_str]["warns"]) + 1
-    }
-
-    warns_data[user_id_str]["warns"].append(warn)
-    warns_data[user_id_str]["total_warns"] += 1
+    total_warns = add_warn_record(warns_data, target.id, reason, actor.id, actor.first_name or str(actor.id))
     save_warns(warns_data)
 
-    settings = load_settings(update.effective_chat.id)
-    total_warns = warns_data[user_id_str]["total_warns"]
+    settings = load_settings(chat_id)
 
     await update.message.reply_text(
         f"⚠️ <b>OGOHLANTIRISH</b>\n"
@@ -1196,36 +1394,21 @@ async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML,
     )
 
-    if total_warns >= settings.warn_limit:
-        if settings.ban_on_warn:
-            try:
-                await context.bot.ban_chat_member(
-                    chat_id=update.effective_chat.id,
-                    user_id=target.id
-                )
-                await update.message.reply_text(
-                    f"🔨 <b>AVTOMATIK BAN</b>\n"
-                    f"{mention(target)} {settings.warn_limit} ta ogohlantirishdan keyin ban qilindi!",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                pass
-        elif settings.mute_on_warn:
-            try:
-                until_date = datetime.now(timezone.utc) + timedelta(minutes=settings.mute_duration)
-                await context.bot.restrict_chat_member(
-                    chat_id=update.effective_chat.id,
-                    user_id=target.id,
-                    permissions=ChatPermissions(can_send_messages=False),
-                    until_date=until_date
-                )
-                await update.message.reply_text(
-                    f"🔇 <b>AVTOMATIK MUTE</b>\n"
-                    f"{mention(target)} {settings.warn_limit} ta ogohlantirishdan keyin {settings.mute_duration} daqiqaga mute qilindi!",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                pass
+    consequence = await apply_warn_limit_consequence(context, chat_id, target, total_warns, settings)
+    if consequence:
+        c_kind, c_val = consequence
+        if c_kind == "ban":
+            await update.message.reply_text(
+                f"🔨 <b>AVTOMATIK BAN</b>\n"
+                f"{mention(target)} {settings.warn_limit} ta ogohlantirishdan keyin ban qilindi!",
+                parse_mode=ParseMode.HTML
+            )
+        elif c_kind == "mute":
+            await update.message.reply_text(
+                f"🔇 <b>AVTOMATIK MUTE</b>\n"
+                f"{mention(target)} {settings.warn_limit} ta ogohlantirishdan keyin {c_val} daqiqaga mute qilindi!",
+                parse_mode=ParseMode.HTML
+            )
 
 # ---------------------------------------------------------------------------
 # WARNS - oddiy user faqat O'ZINI ko'ra oladi, admin istalganini ko'ra oladi
@@ -1392,6 +1575,144 @@ async def del_word_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ---------------------------------------------------------------------------
+# Salomlashish / xayrlashish matnini sozlash
+# ---------------------------------------------------------------------------
+
+@only_group
+@require_admin
+async def set_welcome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "⚠️ Foydalanish: <code>.setwelcome Salom {user}, {group} guruhiga xush kelibsiz!</code>\n"
+            "📌 O'zgaruvchilar: <code>{user}</code> <code>{group}</code> <code>{count}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    text = update.message.text.split(None, 1)[1]
+    settings = load_settings(update.effective_chat.id)
+    settings.welcome_text = text
+    save_settings(update.effective_chat.id, settings)
+    await update.message.reply_text("✅ Salomlashish matni yangilandi:\n\n" + text, parse_mode=ParseMode.HTML)
+
+@only_group
+@require_admin
+async def set_goodbye_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "⚠️ Foydalanish: <code>.setgoodbye Xayr {user}!</code>\n"
+            "📌 O'zgaruvchilar: <code>{user}</code> <code>{group}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    text = update.message.text.split(None, 1)[1]
+    settings = load_settings(update.effective_chat.id)
+    settings.goodbye_text = text
+    save_settings(update.effective_chat.id, settings)
+    await update.message.reply_text("✅ Xayrlashish matni yangilandi:\n\n" + text, parse_mode=ParseMode.HTML)
+
+# ---------------------------------------------------------------------------
+# Taqiqlangan so'z / link uchun jazo turini to'liq sozlash
+# ---------------------------------------------------------------------------
+
+@only_group
+@require_admin
+async def set_word_action_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    if not args or args[0].lower() not in ACTION_ORDER:
+        await update.message.reply_text(
+            f"⚠️ Foydalanish: <code>.setwordaction {'|'.join(ACTION_ORDER)}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    settings = load_settings(update.effective_chat.id)
+    settings.word_action = args[0].lower()
+    save_settings(update.effective_chat.id, settings)
+    await update.message.reply_text(
+        f"✅ Taqiqlangan so'z uchun jazo o'rnatildi: <b>{ACTION_LABELS[settings.word_action]}</b>",
+        parse_mode=ParseMode.HTML,
+    )
+
+@only_group
+@require_admin
+async def set_link_action_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    if not args or args[0].lower() not in ACTION_ORDER:
+        await update.message.reply_text(
+            f"⚠️ Foydalanish: <code>.setlinkaction {'|'.join(ACTION_ORDER)}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    settings = load_settings(update.effective_chat.id)
+    settings.link_action = args[0].lower()
+    save_settings(update.effective_chat.id, settings)
+    await update.message.reply_text(
+        f"✅ Link yuborgani uchun jazo o'rnatildi: <b>{ACTION_LABELS[settings.link_action]}</b>",
+        parse_mode=ParseMode.HTML,
+    )
+
+@only_group
+@require_admin
+async def set_word_mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    if not args or not args[0].isdigit() or int(args[0]) <= 0:
+        await update.message.reply_text("⚠️ Foydalanish: <code>.setwordmute 15</code> (daqiqa)", parse_mode=ParseMode.HTML)
+        return
+    settings = load_settings(update.effective_chat.id)
+    settings.word_mute_minutes = int(args[0])
+    save_settings(update.effective_chat.id, settings)
+    await update.message.reply_text(f"✅ Taqiqlangan so'z uchun mute vaqti: <b>{settings.word_mute_minutes}</b> daqiqa", parse_mode=ParseMode.HTML)
+
+@only_group
+@require_admin
+async def set_link_mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    if not args or not args[0].isdigit() or int(args[0]) <= 0:
+        await update.message.reply_text("⚠️ Foydalanish: <code>.setlinkmute 15</code> (daqiqa)", parse_mode=ParseMode.HTML)
+        return
+    settings = load_settings(update.effective_chat.id)
+    settings.link_mute_minutes = int(args[0])
+    save_settings(update.effective_chat.id, settings)
+    await update.message.reply_text(f"✅ Link uchun mute vaqti: <b>{settings.link_mute_minutes}</b> daqiqa", parse_mode=ParseMode.HTML)
+
+@only_group
+@require_admin
+async def set_word_ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    if not args or parse_duration(args[0]) is False:
+        await update.message.reply_text(
+            "⚠️ Foydalanish: <code>.setwordban 1d</code> (masalan: 30m, 1h, 7d, doimiy)",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    settings = load_settings(update.effective_chat.id)
+    settings.word_ban_duration = args[0].lower()
+    save_settings(update.effective_chat.id, settings)
+    await update.message.reply_text(
+        f"✅ Taqiqlangan so'z uchun ban muddati: <b>{fmt_duration(parse_duration(settings.word_ban_duration))}</b>",
+        parse_mode=ParseMode.HTML,
+    )
+
+@only_group
+@require_admin
+async def set_link_ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    if not args or parse_duration(args[0]) is False:
+        await update.message.reply_text(
+            "⚠️ Foydalanish: <code>.setlinkban 1d</code> (masalan: 30m, 1h, 7d, doimiy)",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    settings = load_settings(update.effective_chat.id)
+    settings.link_ban_duration = args[0].lower()
+    save_settings(update.effective_chat.id, settings)
+    await update.message.reply_text(
+        f"✅ Link uchun ban muddati: <b>{fmt_duration(parse_duration(settings.link_ban_duration))}</b>",
+        parse_mode=ParseMode.HTML,
+    )
+
+# ---------------------------------------------------------------------------
 # Bot egasi buyruqlari
 # ---------------------------------------------------------------------------
 
@@ -1538,63 +1859,11 @@ async def apply_message_filter(update: Update, context: ContextTypes.DEFAULT_TYP
     settings = load_settings(chat_id)
 
     if settings.banned_words and has_banned_words(text, settings.banned_words):
-        if settings.delete_banned:
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
-            except Exception:
-                pass
-
-        if settings.notify_admin:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"🚫 <b>Taqiqlangan so'z</b>\n{mention(user)} taqiqlangan so'z ishlatdi!",
-                parse_mode=ParseMode.HTML
-            )
-
-        warns_data = load_warns()
-        user_id_str = str(user.id)
-        if user_id_str not in warns_data:
-            warns_data[user_id_str] = {"warns": [], "total_warns": 0}
-
-        warns_data[user_id_str]["warns"].append({
-            "reason": "Taqiqlangan so'z ishlatish",
-            "admin_id": user.id,
-            "admin_name": "Bot (avtomatik)",
-            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "warn_id": len(warns_data[user_id_str]["warns"]) + 1
-        })
-        warns_data[user_id_str]["total_warns"] += 1
-        save_warns(warns_data)
+        await execute_violation_action(update, context, settings, user, "word", "Taqiqlangan so'z ishlatish")
         return
 
     if settings.banned_links and has_links(text):
-        if settings.delete_banned:
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
-            except Exception:
-                pass
-
-        if settings.notify_admin:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"🔗 <b>Link</b>\n{mention(user)} link yubordi!",
-                parse_mode=ParseMode.HTML
-            )
-
-        warns_data = load_warns()
-        user_id_str = str(user.id)
-        if user_id_str not in warns_data:
-            warns_data[user_id_str] = {"warns": [], "total_warns": 0}
-
-        warns_data[user_id_str]["warns"].append({
-            "reason": "Link yuborish",
-            "admin_id": user.id,
-            "admin_name": "Bot (avtomatik)",
-            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "warn_id": len(warns_data[user_id_str]["warns"]) + 1
-        })
-        warns_data[user_id_str]["total_warns"] += 1
-        save_warns(warns_data)
+        await execute_violation_action(update, context, settings, user, "link", "Link yuborish")
         return
 
 # ---------------------------------------------------------------------------
@@ -1619,6 +1888,14 @@ DOT_COMMANDS = {
     ".del": del_cmd,
     ".addword": add_word_cmd,
     ".delword": del_word_cmd,
+    ".setwelcome": set_welcome_cmd,
+    ".setgoodbye": set_goodbye_cmd,
+    ".setwordaction": set_word_action_cmd,
+    ".setlinkaction": set_link_action_cmd,
+    ".setwordmute": set_word_mute_cmd,
+    ".setlinkmute": set_link_mute_cmd,
+    ".setwordban": set_word_ban_cmd,
+    ".setlinkban": set_link_ban_cmd,
     ".addadmin": add_admin_cmd,
     ".removeadmin": remove_admin_cmd,
 }
