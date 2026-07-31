@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 CS 1.6 Server uchun FULL Telegram Bot
-Versiya: 3.1 - Tuzatilgan
+Versiya: 3.2 - Conflict xatosi tuzatilgan
 """
 
 import json
@@ -210,14 +210,13 @@ def mention(user) -> str:
     return f'<a href="tg://user?id={user.id}">{name}</a>'
 
 def get_server_info():
-    """Server ma'lumotlarini olish - a2s kutubxonasi uchun to'g'ri"""
+    """Server ma'lumotlarini olish"""
     address = (config.SERVER_IP, config.SERVER_PORT)
     try:
-        # a2s.info o'rniga a2s.a2s_info ishlatamiz
-        info = a2s.a2s_info(address, timeout=3.0)
+        info = a2s.info(address, timeout=3.0)
         players = []
         try:
-            players = a2s.a2s_players(address, timeout=3.0)
+            players = a2s.players(address, timeout=3.0)
         except:
             pass
         return info, players
@@ -354,7 +353,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
 
 # ---------------------------------------------------------------------------
-# Settings callback handler - TUZATILGAN
+# Settings callback handler
 # ---------------------------------------------------------------------------
 
 async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -364,8 +363,6 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     settings = load_settings(chat_id)
     data = query.data
-    
-    # callback_query dan message olish
     message = query.message
     
     if data == "settings_welcome":
@@ -558,7 +555,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_cmd(update, context)
 
 # ---------------------------------------------------------------------------
-# Inline button handler - TUZATILGAN
+# Inline button handler
 # ---------------------------------------------------------------------------
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -581,11 +578,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await settings_callback(update, context)
 
 # ---------------------------------------------------------------------------
-# /info - TUZATILGAN a2s bilan
+# /info
 # ---------------------------------------------------------------------------
 
 async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Agar callback dan kelgan bo'lsa
     if update.callback_query:
         message = update.callback_query.message
         await message.edit_text("⏳ Server holati tekshirilmoqda...")
@@ -638,7 +634,7 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(text, parse_mode=ParseMode.HTML)
 
 # ---------------------------------------------------------------------------
-# /ping - TUZATILGAN a2s bilan
+# /ping
 # ---------------------------------------------------------------------------
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -653,7 +649,7 @@ async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start_time = time.time()
     
     try:
-        info = a2s.a2s_info(address, timeout=3.0)
+        info = a2s.info(address, timeout=3.0)
         end_time = time.time()
         ping_ms = int((end_time - start_time) * 1000)
         
@@ -1418,7 +1414,7 @@ async def dot_command_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await DOT_COMMANDS[cmd](update, context)
 
 # ---------------------------------------------------------------------------
-# Botni ishga tushirish
+# Botni ishga tushirish - CONFLICT XATOSI TUZATILDI
 # ---------------------------------------------------------------------------
 
 async def run_bot_async():
@@ -1445,9 +1441,14 @@ async def run_bot_async():
 
     logger.info("Bot ishga tushdi...")
     
+    # Webhook ni o'chirish - CONFLICT xatosini oldini olish uchun
+    await application.bot.delete_webhook(drop_pending_updates=True)
+    
     await application.initialize()
     await application.start()
-    await application.updater.start_polling()
+    
+    # Polling ni ishga tushirish
+    await application.updater.start_polling(drop_pending_updates=True)
     
     try:
         while True:
