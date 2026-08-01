@@ -1069,6 +1069,8 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    password_text = "🔒 Ha" if info.password_protected else "🔓 Yo'q"
+
     text = (
         "🎮 <b>CS 1.6 SERVER MA'LUMOTI</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -1076,32 +1078,25 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🗺 <b>Karta:</b> <code>{info.map_name}</code>\n"
         f"🌐 <b>IP:</b> <code>{config.SERVER_IP}:{config.SERVER_PORT}</code>\n"
         f"👥 <b>O'yinchilar:</b> {info.player_count}/{info.max_players}\n"
+        f"🔐 <b>Parol:</b> {password_text}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
     )
 
-    password_text = "🔒 Ha" if info.password_protected else "🔓 Yo'q"
-    text += f"{password_text} <b>Parol:</b>\n"
-    text += "━━━━━━━━━━━━━━━━━━\n"
+    real_players = [p for p in players if p.name and p.name.strip()] if players else []
+    real_players.sort(key=lambda p: p.score, reverse=True)
 
-    if players:
-        real_players = [p for p in players if p.name and p.name.strip()]
-        real_players.sort(key=lambda p: p.score, reverse=True)
-        if real_players:
-            text += f"\n👤 <b>O'yinchilar ({len(real_players)}/{info.player_count})</b>\n"
-            text += "```\n"
-            text += f"{'№':<3} {'NICK':<20} {'KILLS':>6}\n"
-            text += "─" * 30 + "\n"
-            for i, p in enumerate(real_players, start=1):
-                nick = p.name[:20]
-                kills = p.score
-                text += f"{i:<3} {nick:<20} {kills:>6}\n"
-            text += "```"
-        else:
-            text += "\n👤 Hozircha serverda o'yinchi yo'q."
+    if real_players:
+        MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
+        text += f"\n👤 <b>O'yinchilar</b> ({len(real_players)}/{info.player_count})\n\n"
+        for i, p in enumerate(real_players, start=1):
+            rank_icon = MEDALS.get(i, f"{i}.")
+            nick = p.name.strip()
+            kills = p.score
+            text += f"{rank_icon}  <b>{nick}</b> — <code>{kills}</code> kill\n"
     else:
         text += "\n👤 Hozircha serverda o'yinchi yo'q."
 
-    keyboard = [[InlineKeyboardButton("🔄 Yangilash", callback_data="info")]]
-    await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+    await msg.edit_text(text, parse_mode=ParseMode.HTML)
 
 # ---------------------------------------------------------------------------
 # .ping
